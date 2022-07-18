@@ -36,7 +36,8 @@ impl ManageConnection for RedisConnectionManager {
     }
 
     fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
-        conn.get_connection().map(|v| ())
+        conn.get_connection()?;
+        Ok(())
     }
 }
 

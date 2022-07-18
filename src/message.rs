@@ -1,7 +1,9 @@
 use crate::handlers::MessageStorer;
 use cassandra_cpp::{Cluster, Error, Session};
-use r2d2::{ManageConnection, PooledConnection};
-use std::future::{self, Future};
+use r2d2::ManageConnection;
+use std::borrow::Borrow;
+use std::future::Future;
+use std::ops::Deref;
 use std::pin::Pin;
 
 #[derive(Debug)]
@@ -24,7 +26,7 @@ impl ManageConnection for CassandraConnectionManager {
         Cluster::default().set_contact_points(&self.addr)?.connect()
     }
 
-    fn has_broken(&self, conn: &mut Self::Connection) -> bool {
+    fn has_broken(&self, _: &mut Self::Connection) -> bool {
         return true;
     }
 
@@ -38,17 +40,19 @@ impl ManageConnection for CassandraConnectionManager {
     }
 }
 
-pub(crate) struct CassandraStorer {
-    sess: PooledConnection<CassandraConnectionManager>,
+pub(crate) struct CassandraStorer<T: Deref<Target = Session> + Send + Sync + Unpin> {
+    sess: T,
 }
 
-impl CassandraStorer {
-    pub fn new(sess: PooledConnection<CassandraConnectionManager>) -> Result<Self, Error> {
+impl<T: Deref<Target = Session> + Send + Sync + Unpin> CassandraStorer<T> {
+    pub fn new(sess: T) -> Result<Self, Error> {
         Ok(Self { sess })
     }
 }
 
-impl MessageStorer for CassandraStorer {
+impl<T: Deref<Target = Session> + Send + Sync + Unpin + 'static> MessageStorer
+    for CassandraStorer<T>
+{
     type StoreOutput = Pin<Box<dyn Future<Output = Result<(), anyhow::Error>>>>;
     type LoadOutput = Pin<Box<dyn Future<Output = Result<Vec<String>, anyhow::Error>>>>;
     fn store(self, uid: i32, content: String) -> Self::StoreOutput {
@@ -56,16 +60,25 @@ impl MessageStorer for CassandraStorer {
             let mut stmt = self
                 .sess
                 .prepare("INSERT INTO with_baby.messages (uid, content) VALUES (?, ?)")
-                .map_err(|e| anyhow::Error::msg("failed to prepare cassandra statement"))?
+                .map_err(|e| {
+                    anyhow::Error::msg(e.0.to_string())
+                        .context("failed to prepare cassandra statement")
+                })?
                 .await
-                .map_err(|e| anyhow::Error::msg("failed to prepare cassandra statement"))?
+                .map_err(|e| {
+                    anyhow::Error::msg(e.0.to_string())
+                        .context("failed to prepare cassandra statement")
+                })?
                 .bind();
-            stmt.bind_int32(0, uid);
-            stmt.bind_string(0, &content);
-            self.sess
-                .execute(&stmt)
-                .await
-                .map_err(|e| anyhow::Error::msg("failed to execute statement"))?;
+            stmt.bind_int32(0, uid).map_err(|e| {
+                anyhow::Error::msg(e.0.to_string()).context("failed to bind parameters")
+            })?;
+            stmt.bind_string(0, &content).map_err(|e| {
+                anyhow::Error::msg(e.0.to_string()).context("failed to bind parameters")
+            })?;
+            self.sess.borrow().execute(&stmt).await.map_err(|e| {
+                anyhow::Error::msg(e.0.to_string()).context("failed to execute statement")
+            })?;
             Ok(())
         })
     }
