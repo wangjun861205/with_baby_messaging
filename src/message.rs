@@ -48,6 +48,40 @@ impl<T: Deref<Target = Session> + Send + Sync + Unpin> CassandraStorer<T> {
     pub fn new(sess: T) -> Result<Self, Error> {
         Ok(Self { sess })
     }
+
+    fn test<'a>(
+        &'a self,
+        uid: i32,
+        content: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + 'a>> {
+        Box::pin(async move {
+            let mut stmt = self
+                .sess
+                .prepare("INSERT INTO with_baby.messages (uid, content) VALUES (?, ?)")
+                .map_err(|e| {
+                    anyhow::Error::msg(e.0.to_string())
+                        .context("failed to prepare cassandra statement")
+                })?
+                .await
+                .map_err(|e| {
+                    anyhow::Error::msg(e.0.to_string())
+                        .context("failed to prepare cassandra statement")
+                })?
+                .bind();
+            stmt.bind_int32(0, uid)
+                .map_err(|e| {
+                    anyhow::Error::msg(e.0.to_string()).context("failed to bind parameters")
+                })?
+                .bind_string(1, &content)
+                .map_err(|e| {
+                    anyhow::Error::msg(e.0.to_string()).context("failed to bind parameters")
+                })?;
+            self.sess.borrow().execute(&stmt).await.map_err(|e| {
+                anyhow::Error::msg(e.0.to_string()).context("failed to execute statement")
+            })?;
+            Ok(())
+        })
+    }
 }
 
 impl<T: Deref<Target = Session> + Send + Sync + Unpin + 'static> MessageStorer
@@ -70,12 +104,14 @@ impl<T: Deref<Target = Session> + Send + Sync + Unpin + 'static> MessageStorer
                         .context("failed to prepare cassandra statement")
                 })?
                 .bind();
-            stmt.bind_int32(0, uid).map_err(|e| {
-                anyhow::Error::msg(e.0.to_string()).context("failed to bind parameters")
-            })?;
-            stmt.bind_string(0, &content).map_err(|e| {
-                anyhow::Error::msg(e.0.to_string()).context("failed to bind parameters")
-            })?;
+            stmt.bind_int32(0, uid)
+                .map_err(|e| {
+                    anyhow::Error::msg(e.0.to_string()).context("failed to bind parameters")
+                })?
+                .bind_string(1, &content)
+                .map_err(|e| {
+                    anyhow::Error::msg(e.0.to_string()).context("failed to bind parameters")
+                })?;
             self.sess.borrow().execute(&stmt).await.map_err(|e| {
                 anyhow::Error::msg(e.0.to_string()).context("failed to execute statement")
             })?;
@@ -117,5 +153,49 @@ impl<T: Deref<Target = Session> + Send + Sync + Unpin + 'static> MessageStorer
             }
             Ok(l)
         })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use tokio::test;
+
+    #[test]
+    async fn test_insert() {
+        let sess = cassandra_cpp::Cluster::default()
+            .set_contact_points("localhost")
+            .expect("failed to connect to cassandra")
+            .connect()
+            .expect("failed to build session");
+        let storer = CassandraStorer::new(Box::new(sess)).expect("failed to create storer");
+        storer
+            .store(1, "hello cassandra".into())
+            .await
+            .expect("failed to store message");
+    }
+    #[test]
+    async fn test_load() {
+        let sess = cassandra_cpp::Cluster::default()
+            .set_contact_points("localhost")
+            .expect("failed to connect to cassandra")
+            .connect()
+            .expect("failed to build session");
+        let storer = CassandraStorer::new(Box::new(sess)).expect("failed to create storer");
+        let l = storer.load(1).await.expect("failed to load message");
+        assert!(l[0] == "hello cassandra");
+    }
+    #[test]
+    async fn test_test() {
+        let sess = cassandra_cpp::Cluster::default()
+            .set_contact_points("localhost")
+            .expect("failed to connect to cassandra")
+            .connect()
+            .expect("failed to build session");
+        let storer = CassandraStorer::new(Box::new(sess)).expect("failed to create storer");
+        storer
+            .test(2, "lifetime".into())
+            .await
+            .expect("failed to load message");
     }
 }

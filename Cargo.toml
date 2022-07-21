@@ -18,3 +18,4 @@ chrono = "*"
 cassandra-cpp = "*"
 r2d2 = "*"
 dotenv = "*"
+tokio = { version="*", features=["macros"]}
